@@ -39,15 +39,21 @@ MOCK_LISTINGS = [
      "latitude": 40.7089, "longitude": -74.0723},
 ]
 
-def fetch_listings(api_key, city, state, limit=20):
+def fetch_listings(api_key, city, state, limit=20, prop_type=None,
+                   min_price=None, max_price=None, min_beds=None):
     if not api_key:
-        return MOCK_LISTINGS, True  # True = is_mock
+        return MOCK_LISTINGS, True
     try:
+        params = {"city": city, "state": state, "status": "Active", "limit": limit}
+        if prop_type and prop_type != "Any":
+            params["propertyType"] = prop_type
+        if min_price: params["minPrice"] = min_price
+        if max_price: params["maxPrice"] = max_price
+        if min_beds:  params["minBedrooms"] = min_beds
         resp = requests.get(
             f"{RENTCAST_BASE}/listings/sale",
             headers={"X-Api-Key": api_key},
-            params={"city": city, "state": state, "propertyType": "Multi Family",
-                    "status": "Active", "limit": limit},
+            params=params,
             timeout=10
         )
         if resp.status_code == 200:
@@ -102,6 +108,36 @@ def smart_defaults(listing):
         "rehab_budget":    rehab,
         "closing_costs":   closing,
     }
+
+def quick_irr(listing, hold=7, down_pct=25, int_rate_pct=6.5,
+              appreciation=3.0, vacancy=5, selling_costs=5.0):
+    """Fast IRR estimate for listing table — uses smart defaults, 30yr mortgage, no cost seg."""
+    price = listing.get("price", 0)
+    if not price:
+        return None
+    d        = smart_defaults(listing)
+    rent     = d["monthly_rent"] * 12
+    taxes    = d["exp_taxes"]; ins  = d["exp_ins"]
+    utils    = d["exp_utils"]; maint= d["exp_other"]; hoa = d["exp_hoa"]
+    down     = price * (down_pct / 100)
+    loan     = price - down
+    cash_in  = down + d["closing_costs"] + d["rehab_budget"]
+    rm       = (int_rate_pct / 100) / 12; nm30 = 30 * 12
+    pmt      = loan * (rm*(1+rm)**nm30)/((1+rm)**nm30-1) if rm > 0 else loan/nm30
+    annual_ds= pmt * 12
+    cfs      = [-cash_in]
+    prop_val = price; months_paid = 0; bal = loan
+    for _ in range(hold):
+        eff  = rent * (1 - vacancy / 100)
+        opex = taxes + ins + utils + maint + hoa + eff * 0.08
+        cf   = eff - opex - annual_ds
+        prop_val    *= (1 + appreciation / 100)
+        months_paid += 12
+        bal = loan*((1+rm)**nm30-(1+rm)**months_paid)/((1+rm)**nm30-1) if rm>0 else max(0,loan*(1-months_paid/nm30))
+        cfs.append(cf)
+        rent*=1.03; taxes*=1.02; utils*=1.03; ins*=1.04; maint*=1.025
+    cfs[-1] += prop_val*(1-selling_costs/100) - bal
+    return irr_newton(cfs)
 
 # ==========================================
 # CALCULATION ENGINE (carried from v1)
@@ -169,10 +205,22 @@ with st.sidebar.expander("🔑 Rentcast API", expanded=True):
     else:
         st.caption("🟢 Live data mode")
 
-with st.sidebar.expander("🔍 Search", expanded=True):
+with st.sidebar.expander("🔍 Search & Filters", expanded=True):
     city  = st.text_input("City", value="Jersey City")
     state = st.text_input("State", value="NJ")
-    limit = st.slider("Max listings", 5, 50, 20)
+    prop_type = st.selectbox("Property Type",
+                             ["Any", "Multi Family", "Single Family", "Condo", "Townhouse", "Apartment"])
+    min_beds  = st.selectbox("Min Bedrooms", [None, 1, 2, 3, 4, 5],
+                              format_func=lambda x: "Any" if x is None else f"{x}+")
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        min_price = st.number_input("Min Price ($)", value=0, step=50_000)
+    with pc2:
+        max_price = st.number_input("Max Price ($)", value=0, step=50_000,
+                                     help="0 = no max")
+    min_irr   = st.slider("Min IRR % (7-yr)", min_value=0, max_value=30, value=0,
+                           help="Filter listings by estimated 7-year IRR")
+    limit     = st.slider("Max listings to fetch", 5, 50, 20)
     search_btn = st.button("Search listings", type="primary")
 
 all_scenarios = load_all_scenarios()
@@ -207,7 +255,17 @@ st.caption("Search multi-family listings, select one, and instantly run your ful
 
 if search_btn or "listings" not in st.session_state:
     with st.spinner("Fetching listings..."):
-        listings, is_mock = fetch_listings(api_key, city, state, limit)
+        max_p = max_price if max_price > 0 else None
+        min_p = min_price if min_price > 0 else None
+        listings, is_mock = fetch_listings(
+            api_key, city, state, limit,
+            prop_type=prop_type if prop_type != "Any" else None,
+            min_price=min_p, max_price=max_p, min_beds=min_beds
+        )
+        # Compute quick IRR for every listing
+        for l in listings:
+            irr_val = quick_irr(l)
+            l["_irr"] = irr_val
         st.session_state.listings = listings
         st.session_state.is_mock  = is_mock
 
@@ -218,26 +276,49 @@ if is_mock:
     st.info("📌 Showing mock Jersey City listings — add your Rentcast API key for live data.")
 
 if listings:
-    # Build display table
+    # Client-side filters: property type, price range, beds, IRR
+    def passes_filters(l):
+        if prop_type != "Any" and l.get("propertyType","").lower() != prop_type.lower():
+            return False
+        p = l.get("price", 0)
+        if min_price > 0 and p < min_price: return False
+        if max_price > 0 and p > max_price: return False
+        if min_beds and (l.get("bedrooms") or 0) < min_beds: return False
+        irr_v = l.get("_irr")
+        if min_irr > 0 and (irr_v is None or irr_v < min_irr): return False
+        return True
+
+    filtered = [l for l in listings if passes_filters(l)]
+
+    if not filtered:
+        st.warning("No listings match your filters. Try relaxing the criteria.")
+        st.stop()
+
+    # Sort by IRR desc
+    filtered.sort(key=lambda l: l.get("_irr") or -999, reverse=True)
+
     rows = []
-    for l in listings:
-        rent_est = l.get("rentEstimate") or "—"
+    for l in filtered:
+        irr_v    = l.get("_irr")
+        rent_est = l.get("rentEstimate") or smart_defaults(l)["monthly_rent"]
         rows.append({
-            "Address":      l.get("formattedAddress", l.get("address", "Unknown")),
-            "Price":        fmt_d(l.get("price", 0)),
-            "Beds/Baths":   f"{l.get('bedrooms','?')}bd / {l.get('bathrooms','?')}ba",
-            "Sq Ft":        f"{l.get('squareFootage', '?'):,}" if l.get('squareFootage') else "—",
-            "Est. Rent/mo": fmt_d(rent_est) if isinstance(rent_est, (int, float)) else rent_est,
-            "Year Built":   l.get("yearBuilt", "—"),
-            "_idx":         listings.index(l),
+            "Address":        l.get("formattedAddress", l.get("address", "Unknown")),
+            "Price":          fmt_d(l.get("price", 0)),
+            "Type":           l.get("propertyType", "—"),
+            "Beds/Baths":     f"{l.get('bedrooms','?')}bd / {l.get('bathrooms','?')}ba",
+            "Sq Ft":          f"{l.get('squareFootage',0):,}" if l.get("squareFootage") else "—",
+            "Est. Rent/mo":   fmt_d(rent_est),
+            "7-yr IRR":       f"{irr_v:.1f}%" if irr_v is not None else "—",
+            "Year Built":     l.get("yearBuilt", "—"),
+            "_orig_idx":      listings.index(l),
         })
 
     df_list = pd.DataFrame(rows)
-    st.subheader(f"{'Mock' if is_mock else 'Live'} Listings — {city}, {state}")
+    st.subheader(f"{'Mock' if is_mock else 'Live'} Listings — {city}, {state}  "
+                 f"({len(filtered)} shown, sorted by IRR ↓)")
 
-    # Clickable selection
     sel = st.dataframe(
-        df_list.drop(columns=["_idx"]),
+        df_list.drop(columns=["_orig_idx"]),
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -247,13 +328,10 @@ if listings:
     selected_rows = sel.selection.rows if sel and sel.selection else []
 
     if selected_rows:
-        idx = selected_rows[0]
-        listing = listings[idx]
-        defaults = smart_defaults(listing)
-
-        # Merge with any existing session inputs for this listing
+        filtered_idx = selected_rows[0]
+        listing      = filtered[filtered_idx]
+        defaults     = smart_defaults(listing)
         inp = {**defaults, **{k: v for k, v in st.session_state.inputs.items() if k in defaults}}
-
         st.session_state.selected_listing = listing
         st.session_state.inputs = inp
 
