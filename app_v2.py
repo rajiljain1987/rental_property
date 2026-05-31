@@ -87,11 +87,18 @@ def fetch_rent_estimate(api_key, address, bedrooms, bathrooms):
 # SMART DEFAULTS
 # ==========================================
 
+def to_num(val, default=0):
+    """Safely convert any API value to a float."""
+    try:
+        return float(val) if val is not None and not isinstance(val, (dict, list)) else default
+    except (TypeError, ValueError):
+        return default
+
 def smart_defaults(listing):
-    price      = float(listing.get("price") or 0) or 800_000
-    rent       = float(listing.get("rentEstimate") or 0) or int(price * 0.008)
-    taxes      = float(listing.get("propertyTaxes") or 0) or int(price * 0.014)
-    hoa        = float(listing.get("hoa") or 0)
+    price      = to_num(listing.get("price"), 800_000) or 800_000
+    rent       = to_num(listing.get("rentEstimate")) or int(price * 0.008)
+    taxes      = to_num(listing.get("propertyTaxes")) or int(price * 0.014)
+    hoa        = to_num(listing.get("hoa"))
     insurance  = int(price * 0.005)
     utils      = 3_000
     maint      = int(price * 0.01)
