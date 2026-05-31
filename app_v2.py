@@ -88,14 +88,14 @@ def fetch_rent_estimate(api_key, address, bedrooms, bathrooms):
 # ==========================================
 
 def smart_defaults(listing):
-    price      = listing.get("price", 800_000)
-    rent       = listing.get("rentEstimate") or int(price * 0.008)  # 0.8% rule fallback
-    taxes      = listing.get("propertyTaxes") or int(price * 0.014)  # ~1.4% NJ rate
-    hoa        = listing.get("hoa") or 0
-    insurance  = int(price * 0.005)        # ~0.5% of value
-    utils      = 3_000                     # flat default
-    maint      = int(price * 0.01)         # 1% of value
-    rehab      = int(price * 0.04)         # 4% light reno estimate
+    price      = float(listing.get("price") or 0) or 800_000
+    rent       = float(listing.get("rentEstimate") or 0) or int(price * 0.008)
+    taxes      = float(listing.get("propertyTaxes") or 0) or int(price * 0.014)
+    hoa        = float(listing.get("hoa") or 0)
+    insurance  = int(price * 0.005)
+    utils      = 3_000
+    maint      = int(price * 0.01)
+    rehab      = int(price * 0.04)
     closing    = int(price * 0.03)
     return {
         "purchase_price":  price,
@@ -116,9 +116,10 @@ def quick_irr(listing, hold=7, down_pct=25, int_rate_pct=6.5,
     if not price:
         return None
     d        = smart_defaults(listing)
-    rent     = d["monthly_rent"] * 12
-    taxes    = d["exp_taxes"]; ins  = d["exp_ins"]
-    utils    = d["exp_utils"]; maint= d["exp_other"]; hoa = d["exp_hoa"]
+    rent     = float(d["monthly_rent"] or 0) * 12
+    taxes    = float(d["exp_taxes"] or 0); ins   = float(d["exp_ins"] or 0)
+    utils    = float(d["exp_utils"] or 0); maint = float(d["exp_other"] or 0)
+    hoa      = float(d["exp_hoa"] or 0)
     down     = price * (down_pct / 100)
     loan     = price - down
     cash_in  = down + d["closing_costs"] + d["rehab_budget"]
