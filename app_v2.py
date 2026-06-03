@@ -216,6 +216,10 @@ if "inputs" not in st.session_state:
     st.session_state.inputs = {}
 if "user_unlocked" not in st.session_state:
     st.session_state.user_unlocked = False
+if "api_call_count" not in st.session_state:
+    st.session_state.api_call_count = 0
+if "last_search" not in st.session_state:
+    st.session_state.last_search = ""
 
 # ==========================================
 # SIDEBAR
@@ -228,12 +232,24 @@ with st.sidebar.expander("🔑 Rentcast API", expanded=True):
         st.caption("🟡 No key — showing mock Jersey City data")
     else:
         st.caption("🟢 Live data mode")
+    calls = st.session_state.api_call_count
+    limit_total = 50
+    pct = min(int(calls / limit_total * 100), 100)
+    color = "🟢" if calls < 30 else "🟡" if calls < 45 else "🔴"
+    st.caption(f"{color} API calls this session: **{calls} / {limit_total}**")
+    st.progress(pct)
+    if calls >= 45:
+        st.warning("⚠️ Approaching free tier limit. Consider upgrading at rentcast.io.")
+    if st.button("Reset counter", key="reset_api"):
+        st.session_state.api_call_count = 0
+        st.rerun()
 
 with st.sidebar.expander("🔍 Search & Filters", expanded=True):
     city  = st.text_input("City", value="Jersey City")
     state = st.text_input("State", value="NJ")
     prop_type = st.selectbox("Property Type",
-                             ["Any", "Multi Family", "Single Family", "Condo", "Townhouse", "Apartment"])
+                             ["Any", "Multi Family", "Single Family", "Condo", "Townhouse", "Apartment"],
+                             index=0)
     min_beds  = st.selectbox("Min Bedrooms", [None, 1, 2, 3, 4, 5],
                               format_func=lambda x: "Any" if x is None else f"{x}+")
     pc1, pc2 = st.columns(2)
@@ -280,6 +296,7 @@ st.title("🏘️ Real Estate Deal Analyzer")
 st.caption("Search multi-family listings, select one, and instantly run your full investment analysis.")
 
 if search_btn or "listings" not in st.session_state:
+    search_key = f"{city}|{state}|{prop_type}|{limit}"
     with st.spinner("Fetching listings..."):
         max_p = max_price if max_price > 0 else None
         min_p = min_price if min_price > 0 else None
@@ -288,6 +305,10 @@ if search_btn or "listings" not in st.session_state:
             prop_type=prop_type if prop_type != "Any" else None,
             min_price=min_p, max_price=max_p, min_beds=min_beds
         )
+        # Only count if it was a real API call (not mock) and not a duplicate search
+        if not is_mock and search_key != st.session_state.last_search:
+            st.session_state.api_call_count += 1
+            st.session_state.last_search = search_key
         # Compute quick IRR and cap rate for every listing
         for l in listings:
             l["_irr"] = quick_irr(l)
@@ -304,9 +325,12 @@ if is_mock:
 if listings:
     # Client-side filters: property type, price range, beds, IRR
     def passes_filters(l):
-        if prop_type != "Any" and l.get("propertyType","").lower() != prop_type.lower():
-            return False
-        p = l.get("price", 0)
+        if prop_type != "Any":
+            ptype_raw = (l.get("propertyType") or "").lower().replace(" ", "").replace("-", "")
+            ptype_sel = prop_type.lower().replace(" ", "").replace("-", "")
+            if ptype_sel not in ptype_raw and ptype_raw not in ptype_sel:
+                return False
+        p = l.get("price", 0) or 0
         if min_price > 0 and p < min_price: return False
         if max_price > 0 and p > max_price: return False
         if min_beds and (l.get("bedrooms") or 0) < min_beds: return False
