@@ -116,6 +116,20 @@ def smart_defaults(listing):
         "closing_costs":   closing,
     }
 
+def quick_cap_rate(listing, vacancy=5):
+    """Fast cap rate estimate using smart defaults."""
+    try:
+        d     = smart_defaults(listing)
+        price = d["purchase_price"]
+        if not price: return None
+        eff   = d["monthly_rent"] * 12 * (1 - vacancy / 100)
+        opex  = d["exp_taxes"] + d["exp_ins"] + d["exp_utils"] + d["exp_other"] + d["exp_hoa"] + eff * 0.08
+        noi   = eff - opex
+        return (noi / price) * 100
+    except:
+        return None
+
+
 def quick_irr(listing, hold=7, down_pct=25, int_rate_pct=6.5,
               appreciation=3.0, vacancy=5, selling_costs=5.0):
     """Fast IRR estimate for listing table — uses smart defaults, 30yr mortgage, no cost seg."""
@@ -200,6 +214,8 @@ if "selected_listing" not in st.session_state:
     st.session_state.selected_listing = None
 if "inputs" not in st.session_state:
     st.session_state.inputs = {}
+if "user_unlocked" not in st.session_state:
+    st.session_state.user_unlocked = False
 
 # ==========================================
 # SIDEBAR
@@ -228,6 +244,8 @@ with st.sidebar.expander("🔍 Search & Filters", expanded=True):
                                      help="0 = no max")
     min_irr   = st.slider("Min IRR % (7-yr)", min_value=0, max_value=30, value=0,
                            help="Filter listings by estimated 7-year IRR")
+    min_cap   = st.slider("Min Cap Rate %", min_value=0.0, max_value=10.0, value=0.0, step=0.25,
+                           help="Filter listings by estimated cap rate")
     limit     = st.slider("Max listings to fetch", 5, 50, 20)
     search_btn = st.button("Search listings", type="primary")
 
@@ -270,10 +288,10 @@ if search_btn or "listings" not in st.session_state:
             prop_type=prop_type if prop_type != "Any" else None,
             min_price=min_p, max_price=max_p, min_beds=min_beds
         )
-        # Compute quick IRR for every listing
+        # Compute quick IRR and cap rate for every listing
         for l in listings:
-            irr_val = quick_irr(l)
-            l["_irr"] = irr_val
+            l["_irr"] = quick_irr(l)
+            l["_cap"] = quick_cap_rate(l)
         st.session_state.listings = listings
         st.session_state.is_mock  = is_mock
 
@@ -294,6 +312,8 @@ if listings:
         if min_beds and (l.get("bedrooms") or 0) < min_beds: return False
         irr_v = l.get("_irr")
         if min_irr > 0 and (irr_v is None or irr_v < min_irr): return False
+        cap_v = l.get("_cap")
+        if min_cap > 0 and (cap_v is None or cap_v < min_cap): return False
         return True
 
     filtered = [l for l in listings if passes_filters(l)]
@@ -308,7 +328,8 @@ if listings:
     rows = []
     for l in filtered:
         irr_v    = l.get("_irr")
-        rent_est = l.get("rentEstimate") or smart_defaults(l)["monthly_rent"]
+        cap_v    = l.get("_cap")
+        rent_est = to_num(l.get("rentEstimate")) or smart_defaults(l)["monthly_rent"]
         rows.append({
             "Address":        l.get("formattedAddress", l.get("address", "Unknown")),
             "Price":          fmt_d(l.get("price", 0)),
@@ -316,9 +337,9 @@ if listings:
             "Beds/Baths":     f"{l.get('bedrooms','?')}bd / {l.get('bathrooms','?')}ba",
             "Sq Ft":          f"{l.get('squareFootage',0):,}" if l.get("squareFootage") else "—",
             "Est. Rent/mo":   fmt_d(rent_est),
+            "Cap Rate":       f"{cap_v:.1f}%" if cap_v is not None else "—",
             "7-yr IRR":       f"{irr_v:.1f}%" if irr_v is not None else "—",
             "Year Built":     l.get("yearBuilt", "—"),
-            "_orig_idx":      listings.index(l),
         })
 
     df_list = pd.DataFrame(rows)
@@ -326,7 +347,7 @@ if listings:
                  f"({len(filtered)} shown, sorted by IRR ↓)")
 
     sel = st.dataframe(
-        df_list.drop(columns=["_orig_idx"]),
+        df_list,
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -358,6 +379,36 @@ if not listing:
 st.markdown("---")
 addr = listing.get("formattedAddress", listing.get("address", "Selected Property"))
 st.header(f"📊 {addr}")
+
+# ---- Email capture gate ----
+GOOGLE_FORM_URL = "https://forms.gle/bvZpw5RwDuDpWVvS8"
+
+if not st.session_state.user_unlocked:
+    beds_t  = listing.get("bedrooms", "?")
+    baths_t = listing.get("bathrooms", "?")
+    price_t = fmt_d(listing.get("price", 0))
+    ptype_t = listing.get("propertyType", "Property")
+
+    st.markdown("---")
+    st.markdown(f"### 🔒 {addr}")
+    st.markdown(f"**{ptype_t} · {beds_t} bed / {baths_t} bath · {price_t}**")
+    st.markdown("Get the full investment analysis — IRR, cash flow projections, depreciation, and more.")
+    st.markdown("---")
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown("#### Step 1 — Register (free)")
+        st.link_button("📋 Fill out quick form →", GOOGLE_FORM_URL, type="primary")
+        st.caption("Opens in a new tab. Takes 30 seconds.")
+    with c2:
+        st.markdown("#### Step 2 — Unlock analysis")
+        st.caption("Already submitted the form? Click below.")
+        if st.button("✅ I've submitted — show me the analysis", type="secondary"):
+            st.session_state.user_unlocked = True
+            st.rerun()
+    st.stop()
+
+st.caption(f"✅ Unlocked")
 
 beds  = listing.get("bedrooms", "?")
 baths = listing.get("bathrooms", "?")
